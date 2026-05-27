@@ -26,7 +26,10 @@ def extract_video_id(url):
         return None
     except:
         return None
-
+@app.route('/ping')
+def ping():
+    return "Server is running!"
+    
 @app.route('/')
 def process_buff_like():
     input_url = request.args.get("link")
