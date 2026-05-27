@@ -12,42 +12,6 @@ HEADERS = {
 }
 
 
-def extract_video_id(url):
-    try:
-        r = requests.get(
-            url,
-            allow_redirects=True,
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-
-        final_url = r.url
-
-        patterns = [
-            r'/video/(\d+)',
-            r'aweme_id=(\d+)',
-            r'photo/(\d+)'
-        ]
-
-        for p in patterns:
-            m = re.search(p, final_url)
-            if m:
-                return m.group(1)
-
-        return None
-
-    except:
-        return None
-
-
-def extract_cooldown(text):
-    try:
-        m = re.search(r'(\d+)', str(text))
-        return int(m.group(1)) if m else 0
-    except:
-        return 0
-
-
 def safe_post(url, payload, timeout=15):
     try:
         r = requests.post(
@@ -84,71 +48,191 @@ def safe_post(url, payload, timeout=15):
         }
 
 
+def extract_video_id(url):
+    try:
+
+        r = requests.get(
+            url,
+            allow_redirects=True,
+            timeout=15,
+            headers={
+                "User-Agent":"Mozilla/5.0"
+            }
+        )
+
+        final_url = r.url
+
+        patterns = [
+            r'/video/(\d+)',
+            r'/photo/(\d+)',
+            r'aweme_id=(\d+)'
+        ]
+
+        for p in patterns:
+            m = re.search(p, final_url)
+
+            if m:
+                return m.group(1)
+
+        html = r.text
+
+        m = re.search(
+            r'"aweme_id":"(\d+)"',
+            html
+        )
+
+        if m:
+            return m.group(1)
+
+        return None
+
+    except:
+        return None
+
+
+def extract_cooldown(text):
+
+    try:
+
+        text = str(text)
+
+        m = re.findall(
+            r'(\d+)',
+            text
+        )
+
+        if not m:
+            return 0
+
+        return int(m[0])
+
+    except:
+        return 0
+
+
 @app.route("/api/like")
 def api_like():
 
-    link = request.args.get("link", "").strip()
+    link = request.args.get(
+        "link",
+        ""
+    ).strip()
 
     if not link:
+
         return jsonify({
-            "success": False,
-            "message": "Thiếu ?link="
-        }), 400
+            "success":False,
+            "message":"Thiếu ?link="
+        }),400
 
 
-    video_id = extract_video_id(link)
+    video_id = extract_video_id(
+        link
+    )
+
 
     if not video_id:
+
         return jsonify({
-            "success": False,
-            "message": "Không lấy được video ID"
-        }), 400
+            "success":False,
+            "message":"Không lấy được video ID"
+        }),400
 
 
     try:
 
-        search_resp = safe_post(
-            "https://tikfollowers.com/api/search",
-            {
-                "input": video_id,
-                "type": "videoDetails"
-            }
-        )
+        process_resp = None
+
+        for attempt in range(3):
+
+            search_resp = safe_post(
+                "https://tikfollowers.com/api/search",
+                {
+                    "input":video_id,
+                    "type":"videoDetails"
+                }
+            )
 
 
-        if search_resp.get("status") != "success":
-            return jsonify({
-                "success": False,
-                "stage": "search",
-                "message": search_resp.get(
-                    "message",
-                    "Search thất bại"
+            if search_resp.get(
+                "status"
+            ) != "success":
+
+                return jsonify({
+                    "success":False,
+                    "stage":"search",
+                    "message":
+                    search_resp.get(
+                        "message",
+                        "Search thất bại"
+                    )
+                })
+
+
+            payload = {
+
+                "username":
+                search_resp.get(
+                    "username"
+                ),
+
+                "aweme_id":
+                search_resp.get(
+                    "aweme_id"
+                ),
+
+                "type":
+                "like",
+
+                "service_type":
+                "like",
+
+                "token":
+                search_resp.get(
+                    "token"
                 )
-            })
+            }
 
 
-        token = search_resp.get("token")
-        username = search_resp.get("username")
-        aweme_id = search_resp.get("aweme_id")
+            process_resp = safe_post(
+                "https://tikfollowers.com/api/process",
+                payload,
+                20
+            )
 
 
-        payload = {
-            "username": username,
-            "aweme_id": aweme_id,
-            "type": "like",
-            "service_type": "like",
-            "token": token
-        }
+            msg = str(
+                process_resp.get(
+                    "message",
+                    ""
+                )
+            )
 
 
-        process_resp = safe_post(
-            "https://tikfollowers.com/api/process",
-            payload,
-            20
-        )
+            if (
+                process_resp.get(
+                    "status"
+                ) != "error"
+            ):
+
+                break
 
 
-        if process_resp.get("status") == "error":
+            if (
+                "InvalidOrExpiredToken"
+                in msg
+            ):
+
+                time.sleep(1)
+
+                continue
+
+            break
+
+
+        if process_resp.get(
+            "status"
+        ) == "error":
 
             msg = process_resp.get(
                 "message",
@@ -156,65 +240,94 @@ def api_like():
             )
 
 
-            if (
-                "InvalidOrExpiredToken" in msg
-                or "token" in msg.lower()
-            ):
-
-                time.sleep(2)
-
-                search_resp = safe_post(
-                    "https://tikfollowers.com/api/search",
-                    {
-                        "input": video_id,
-                        "type": "videoDetails"
-                    }
-                )
-
-                if search_resp.get("status") == "success":
-
-                    payload["token"] = search_resp.get("token")
-
-                    process_resp = safe_post(
-                        "https://tikfollowers.com/api/process",
-                        payload,
-                        20
-                    )
+            cooldown = extract_cooldown(
+                msg
+            )
 
 
-            if process_resp.get("status") == "error":
+            return jsonify({
 
-                cooldown = extract_cooldown(msg)
+                "success":False,
 
-                return jsonify({
-                    "success": False,
-                    "cooldown": cooldown > 0,
-                    "wait_time": cooldown,
-                    "message": msg
-                })
+                "cooldown":
+                cooldown > 0,
+
+                "wait_time":{
+
+                    "minutes":
+                    cooldown//60,
+
+                    "seconds":
+                    cooldown%60,
+
+                    "total_seconds":
+                    cooldown
+                },
+
+                "message":
+                msg
+
+            })
 
 
         data = (
-            process_resp.get("response", {})
-            .get("data", {})
-        ) or process_resp.get("data", {})
+
+            process_resp.get(
+                "response",
+                {}
+            ).get(
+                "data",
+                {}
+            )
+
+            or
+
+            process_resp.get(
+                "data",
+                {}
+            )
+
+        )
+
 
         stats = (
-            data.get("stats", {})
-        ) or process_resp.get("stats", {})
+
+            data.get(
+                "stats",
+                {}
+            )
+
+            or
+
+            process_resp.get(
+                "stats",
+                {}
+            )
+
+        )
 
 
         return jsonify({
-            "success": True,
-            "cooldown": False,
+
+            "success":True,
+
+            "cooldown":False,
 
             "username":
-            data.get("username")
-            or username,
+            data.get(
+                "username"
+            )
+            or
+            payload["username"],
+
 
             "video_id":
-            data.get("aweme_id")
-            or aweme_id,
+            data.get(
+                "aweme_id"
+            )
+            or
+            payload["aweme_id"],
+
 
             "amount_processed":
             data.get(
@@ -222,14 +335,15 @@ def api_like():
                 15
             ),
 
+
             "current_views":
-            stats.get("play_count")
-            or process_resp.get(
-                "current_views",
+            stats.get(
+                "play_count",
                 0
             ),
 
-            "stats": {
+
+            "stats":{
 
                 "likes":
                 stats.get(
@@ -264,21 +378,29 @@ def api_like():
 
             "message":
             "Buff thành công"
+
         })
 
 
     except Exception as e:
 
         return jsonify({
-            "success": False,
-            "message": "Lỗi server",
-            "error": str(e)
-        }), 500
 
+            "success":False,
+
+            "message":
+            "Lỗi server",
+
+            "error":
+            str(e)
+
+        }),500
 
 
 if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
-        port=3000
+        port=3000,
+        debug=False
     )
