@@ -13,29 +13,22 @@ HEADERS = {
 
 def extract_video_id(url):
     try:
-        url = unquote(url)
+        url = unquote(url.strip())
         try:
-            r = requests.get(url, headers=HEADERS, allow_redirects=True, timeout=15)
+            r = requests.get(url, headers=HEADERS, allow_redirects=True, timeout=10)
             full_url = r.url
         except:
             full_url = url
 
         patterns = [
-            r"/video/(\d+)",
-            r"vt\.tiktok\.com/([a-zA-Z0-9]+)",
+            r"/video/(\d{18,20})",
+            r"(\d{18,20})"
         ]
 
         for pattern in patterns:
             match = re.search(pattern, full_url)
             if match:
-                # Nếu là short link thì cần resolve thêm (đã làm ở trên)
-                return match.group(1) if len(match.group(1)) > 10 else None
-
-        # Thử lấy từ query hoặc cuối url
-        match = re.search(r"(\d{18,20})", full_url)
-        if match:
-            return match.group(1)
-
+                return match.group(1)
         return None
     except:
         return None
@@ -45,14 +38,15 @@ def extract_cooldown(msg):
     try:
         m = re.search(r"(\d+)\s*minute\(s\).*?(\d+)\s*second\(s\)", msg)
         if m:
-            minute = int(m.group(1))
-            second = int(m.group(2))
-            return {"minutes": minute, "seconds": second, "total_seconds": minute*60 + second}
-
+            return {
+                "minutes": int(m.group(1)),
+                "seconds": int(m.group(2)),
+                "total_seconds": int(m.group(1))*60 + int(m.group(2))
+            }
         s = re.search(r"(\d+)\s*second\(s\)", msg)
         if s:
-            second = int(s.group(1))
-            return {"minutes": 0, "seconds": second, "total_seconds": second}
+            sec = int(s.group(1))
+            return {"minutes": 0, "seconds": sec, "total_seconds": sec}
     except:
         pass
     return {"minutes": 0, "seconds": 0, "total_seconds": 0}
@@ -63,38 +57,37 @@ def home():
     return jsonify({
         "developer": "Đăng Quân",
         "status": "running",
-        "api": "/api/like?link=https://vt.tiktok.com/xxxxx/"
+        "api": "/api/like?link=..."
     })
 
 
 @app.route("/api/like")
 def api_like():
-    link = request.args.get("link", "")
+    link = request.args.get("link", "").strip()
     if not link:
         return jsonify({"success": False, "message": "Thiếu ?link="}), 400
 
     video_id = extract_video_id(link)
     if not video_id:
-        return jsonify({"success": False, "message": "Không lấy được video ID từ link"}), 400
+        return jsonify({"success": False, "message": "Không lấy được video ID"}), 400
 
     try:
-        # === Gọi Search ===
+        # Search
         search_resp = requests.post(
             "https://tikfollowers.com/api/search",
             json={"input": video_id, "type": "videoDetails"},
             headers=HEADERS,
-            timeout=20
+            timeout=15
         ).json()
 
         if search_resp.get("status") != "success":
             return jsonify({
                 "success": False,
                 "stage": "search",
-                "message": "Search thất bại",
-                "response": search_resp
+                "message": search_resp.get("message", "Search thất bại")
             })
 
-        # === Chuẩn bị payload cho Process ===
+        # Process
         payload = {
             "username": search_resp.get("username"),
             "aweme_id": search_resp.get("aweme_id"),
@@ -102,17 +95,15 @@ def api_like():
             "service_type": "like"
         }
 
-        time.sleep(1.2)
+        time.sleep(1)
 
-        # === Gọi Process ===
         process_resp = requests.post(
             "https://tikfollowers.com/api/process",
             json=payload,
             headers=HEADERS,
-            timeout=25
+            timeout=20
         ).json()
 
-        # Xử lý trường hợp cooldown
         if process_resp.get("status") == "error":
             cooldown = extract_cooldown(process_resp.get("message", ""))
             return jsonify({
@@ -122,7 +113,7 @@ def api_like():
                 "message": process_resp.get("message")
             })
 
-        # === Xử lý response thành công (cả 2 cấu trúc) ===
+        # Response thành công
         data = process_resp.get("response", {}).get("data") or process_resp.get("data", {})
         stats = data.get("stats", {}) or process_resp.get("stats", {})
 
@@ -146,12 +137,11 @@ def api_like():
     except Exception as e:
         return jsonify({
             "success": False,
-            "message": "Lỗi server",
+            "message": "Lỗi khi buff",
             "error": str(e)
         }), 500
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 API đang chạy tại port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
