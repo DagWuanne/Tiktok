@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from urllib.parse import unquote
 import requests
 import re
 import time
@@ -14,6 +15,8 @@ COMMON_HEADERS = {
 
 def extract_video_id(url):
     try:
+        url = unquote(url)
+
         try:
             r = requests.head(
                 url,
@@ -36,6 +39,14 @@ def extract_video_id(url):
             long_url
         )
 
+        if match:
+            return match.group(1)
+
+        match = re.search(
+            r"video/(\d+)",
+            url
+        )
+
         return match.group(1) if match else None
 
     except:
@@ -44,12 +55,14 @@ def extract_video_id(url):
 
 def extract_cooldown(message):
     try:
+
         result = re.search(
             r"(\d+)\s*minute\(s\).*?(\d+)\s*second\(s\)",
             message
         )
 
         if result:
+
             minute = int(result.group(1))
             second = int(result.group(2))
 
@@ -65,6 +78,7 @@ def extract_cooldown(message):
         )
 
         if result:
+
             second = int(result.group(1))
 
             return {
@@ -77,30 +91,37 @@ def extract_cooldown(message):
         pass
 
     return {
-        "minutes":0,
-        "seconds":0,
-        "total_seconds":0
+        "minutes": 0,
+        "seconds": 0,
+        "total_seconds": 0
     }
 
 
 @app.route("/api/like", methods=["GET"])
 def process_buff_like():
 
-    link = request.args.get("link")
+    link = unquote(
+        request.args.get(
+            "link",
+            ""
+        )
+    )
 
     if not link:
+
         return jsonify({
-            "success":False,
-            "message":"Thiếu ?link="
+            "success": False,
+            "message": "Thiếu ?link="
         }),400
 
 
     video_id = extract_video_id(link)
 
     if not video_id:
+
         return jsonify({
-            "success":False,
-            "message":"Không lấy được ID video"
+            "success": False,
+            "message": "Không lấy được ID video"
         })
 
 
@@ -109,8 +130,8 @@ def process_buff_like():
         search = requests.post(
             "https://tikfollowers.com/api/search",
             json={
-                "input":video_id,
-                "type":"videoDetails"
+                "input": video_id,
+                "type": "videoDetails"
             },
             headers=COMMON_HEADERS,
             timeout=15
@@ -120,9 +141,9 @@ def process_buff_like():
         if search.get("status") != "success":
 
             return jsonify({
-                "success":False,
-                "stage":"search",
-                "response":search
+                "success": False,
+                "stage": "search",
+                "response": search
             })
 
 
@@ -148,24 +169,29 @@ def process_buff_like():
         if process.get("status") == "error":
 
             cooldown = extract_cooldown(
-                process.get("message","")
+                process.get(
+                    "message",
+                    ""
+                )
             )
 
             return jsonify({
 
-                "success":False,
-                "cooldown":True,
+                "success": False,
+                "cooldown": True,
 
                 "username":
                 process.get(
-                    "data",{}
+                    "data",
+                    {}
                 ).get(
                     "username"
                 ),
 
                 "video_id":
                 process.get(
-                    "data",{}
+                    "data",
+                    {}
                 ).get(
                     "target_identifier"
                 ),
@@ -188,8 +214,8 @@ def process_buff_like():
 
         return jsonify({
 
-            "success":True,
-            "cooldown":False,
+            "success": True,
+            "cooldown": False,
 
             "username":
             process.get(
@@ -247,8 +273,10 @@ def process_buff_like():
     except Exception as e:
 
         return jsonify({
-            "success":False,
-            "error":str(e)
+
+            "success": False,
+            "error": str(e)
+
         })
 
 
@@ -258,13 +286,18 @@ def home():
     return jsonify({
         "developer":"Đăng Quân",
         "status":"running",
-        "api":"/api/like?link="
+        "api":"/api/like?link=tiktok_url"
     })
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
 
-    PORT = int(os.environ.get("PORT",10000))
+    PORT = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
 
     app.run(
         host="0.0.0.0",
