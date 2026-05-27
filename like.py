@@ -2,103 +2,117 @@ from flask import Flask, request, jsonify
 from urllib.parse import unquote
 import requests
 import re
-import time
 import os
+import time
 
 app = Flask(__name__)
 
-COMMON_HEADERS = {
-    "Content-Type": "application/json",
-    "X-Requested-With": "XMLHttpRequest",
-    "User-Agent": "Mozilla/5.0"
+HEADERS = {
+    "User-Agent":"Mozilla/5.0"
 }
 
 def extract_video_id(url):
     try:
+
         url = unquote(url)
 
         try:
-            r = requests.head(
-                url,
-                headers=COMMON_HEADERS,
-                allow_redirects=True,
-                timeout=10
-            )
-        except:
             r = requests.get(
                 url,
-                headers=COMMON_HEADERS,
+                headers=HEADERS,
                 allow_redirects=True,
-                timeout=10
+                timeout=15
             )
 
-        long_url = r.url
+            full_url = r.url
 
-        match = re.search(
+        except:
+            full_url = url
+
+        patterns = [
             r"/video/(\d+)",
-            long_url
-        )
+            r"video/(\d+)"
+        ]
 
-        if match:
-            return match.group(1)
+        for pattern in patterns:
 
-        match = re.search(
-            r"video/(\d+)",
-            url
-        )
+            match = re.search(
+                pattern,
+                full_url
+            )
 
-        return match.group(1) if match else None
+            if match:
+                return match.group(1)
+
+        return None
 
     except:
         return None
 
 
-def extract_cooldown(message):
+def extract_cooldown(msg):
+
     try:
 
-        result = re.search(
+        m = re.search(
             r"(\d+)\s*minute\(s\).*?(\d+)\s*second\(s\)",
-            message
+            msg
         )
 
-        if result:
+        if m:
 
-            minute = int(result.group(1))
-            second = int(result.group(2))
+            minute = int(m.group(1))
+            second = int(m.group(2))
 
             return {
-                "minutes": minute,
-                "seconds": second,
-                "total_seconds": minute * 60 + second
+                "minutes":minute,
+                "seconds":second,
+                "total_seconds":minute*60+second
             }
 
-        result = re.search(
+        s = re.search(
             r"(\d+)\s*second\(s\)",
-            message
+            msg
         )
 
-        if result:
+        if s:
 
-            second = int(result.group(1))
+            second=int(
+                s.group(1)
+            )
 
             return {
-                "minutes": 0,
-                "seconds": second,
-                "total_seconds": second
+                "minutes":0,
+                "seconds":second,
+                "total_seconds":second
             }
 
     except:
         pass
 
     return {
-        "minutes": 0,
-        "seconds": 0,
-        "total_seconds": 0
+        "minutes":0,
+        "seconds":0,
+        "total_seconds":0
     }
 
 
-@app.route("/api/like", methods=["GET"])
-def process_buff_like():
+@app.route("/")
+def home():
+
+    return jsonify({
+
+        "developer":"Đăng Quân",
+
+        "status":"running",
+
+        "api":
+        "/api/like?link=https://vt.tiktok.com/xxxxx/"
+    })
+
+
+@app.route("/api/like")
+def api_like():
 
     link = unquote(
         request.args.get(
@@ -110,46 +124,71 @@ def process_buff_like():
     if not link:
 
         return jsonify({
-            "success": False,
-            "message": "Thiếu ?link="
+
+            "success":False,
+
+            "message":
+            "Thiếu ?link="
+
         }),400
 
 
-    video_id = extract_video_id(link)
+    video_id = extract_video_id(
+        link
+    )
 
     if not video_id:
 
         return jsonify({
-            "success": False,
-            "message": "Không lấy được ID video"
+
+            "success":False,
+
+            "message":
+            "Không lấy được ID video"
+
         })
 
 
     try:
 
         search = requests.post(
+
             "https://tikfollowers.com/api/search",
+
             json={
-                "input": video_id,
-                "type": "videoDetails"
+
+                "input":video_id,
+
+                "type":"videoDetails"
+
             },
-            headers=COMMON_HEADERS,
-            timeout=15
+
+            headers=HEADERS,
+
+            timeout=20
+
         ).json()
 
 
-        if search.get("status") != "success":
+        if search.get(
+            "status"
+        ) != "success":
 
             return jsonify({
-                "success": False,
-                "stage": "search",
-                "response": search
+
+                "success":False,
+
+                "stage":"search",
+
+                "response":
+                search
+
             })
 
 
         payload = search.copy()
 
-        payload["type"] = "like"
+        payload["type"]="like"
 
         payload.pop(
             "status",
@@ -159,42 +198,36 @@ def process_buff_like():
         time.sleep(1)
 
         process = requests.post(
+
             "https://tikfollowers.com/api/process",
+
             json=payload,
-            headers=COMMON_HEADERS,
-            timeout=15
+
+            headers=HEADERS,
+
+            timeout=20
+
         ).json()
 
 
-        if process.get("status") == "error":
+        if process.get(
+            "status"
+        ) == "error":
 
             cooldown = extract_cooldown(
+
                 process.get(
                     "message",
                     ""
                 )
+
             )
 
             return jsonify({
 
-                "success": False,
-                "cooldown": True,
+                "success":False,
 
-                "username":
-                process.get(
-                    "data",
-                    {}
-                ).get(
-                    "username"
-                ),
-
-                "video_id":
-                process.get(
-                    "data",
-                    {}
-                ).get(
-                    "target_identifier"
-                ),
+                "cooldown":True,
 
                 "wait_time":
                 cooldown,
@@ -203,32 +236,41 @@ def process_buff_like():
                 process.get(
                     "message"
                 )
+
             })
 
 
-        stats = process.get(
+        data = process.get(
+            "response",
+            {}
+        ).get(
+            "data",
+            {}
+        )
+
+        stats = data.get(
             "stats",
             {}
         )
 
-
         return jsonify({
 
-            "success": True,
-            "cooldown": False,
+            "success":True,
+
+            "cooldown":False,
 
             "username":
-            process.get(
+            data.get(
                 "username"
             ),
 
             "video_id":
-            process.get(
+            data.get(
                 "aweme_id"
             ),
 
             "amount_processed":
-            process.get(
+            data.get(
                 "amount_processed",
                 15
             ),
@@ -266,7 +308,8 @@ def process_buff_like():
                 )
             },
 
-            "message":"Buff thành công"
+            "message":
+            "Buff thành công"
 
         })
 
@@ -274,25 +317,17 @@ def process_buff_like():
 
         return jsonify({
 
-            "success": False,
-            "error": str(e)
+            "success":False,
+
+            "error":
+            str(e)
 
         })
 
 
-@app.route("/")
-def home():
+if __name__=="__main__":
 
-    return jsonify({
-        "developer":"Đăng Quân",
-        "status":"running",
-        "api":"/api/like?link=tiktok_url"
-    })
-
-
-if __name__ == "__main__":
-
-    PORT = int(
+    port=int(
         os.environ.get(
             "PORT",
             10000
@@ -301,5 +336,5 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=PORT
+        port=port
     )
