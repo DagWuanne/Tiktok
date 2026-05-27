@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/like.py": {
+      "maxDuration": 160
+    }
+  }
+}
