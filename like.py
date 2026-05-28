@@ -112,290 +112,120 @@ def extract_cooldown(text):
 
 @app.route("/api/like")
 def api_like():
-
-    link = request.args.get(
-        "link",
-        ""
-    ).strip()
-
+    link = request.args.get("link", "").strip()
     if not link:
+        return jsonify({"success": False, "message": "Thiếu ?link="}), 400
 
-        return jsonify({
-            "success":False,
-            "message":"Thiếu ?link="
-        }),400
-
-
-    video_id = extract_video_id(
-        link
-    )
-
-
+    video_id = extract_video_id(link)
     if not video_id:
-
-        return jsonify({
-            "success":False,
-            "message":"Không lấy được video ID"
-        }),400
-
+        return jsonify({"success": False, "message": "Không lấy được video ID"}), 400
 
     try:
+        # Headers mạnh hơn
+        search_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://tikfollowers.com",
+            "Referer": "https://tikfollowers.com/"
+        }
 
-        process_resp = None
+        # === SEARCH ===
+        search_resp = requests.post(
+            "https://tikfollowers.com/api/search",
+            json={"input": video_id, "type": "videoDetails"},
+            headers=search_headers,
+            timeout=15
+        )
 
-        for attempt in range(3):
-
-            search_resp = safe_post(
-                "https://tikfollowers.com/api/search",
-                {
-                    "input":video_id,
-                    "type":"videoDetails"
-                }
-            )
-
-
-            if search_resp.get(
-                "status"
-            ) != "success":
-
-                return jsonify({
-                    "success":False,
-                    "stage":"search",
-                    "message":
-                    search_resp.get(
-                        "message",
-                        "Search thất bại"
-                    )
-                })
-
-
-            payload = {
-
-                "username":
-                search_resp.get(
-                    "username"
-                ),
-
-                "aweme_id":
-                search_resp.get(
-                    "aweme_id"
-                ),
-
-                "type":
-                "like",
-
-                "service_type":
-                "like",
-
-                "token":
-                search_resp.get(
-                    "token"
-                )
-            }
-
-
-            process_resp = safe_post(
-                "https://tikfollowers.com/api/process",
-                payload,
-                20
-            )
-
-
-            msg = str(
-                process_resp.get(
-                    "message",
-                    ""
-                )
-            )
-
-
-            if (
-                process_resp.get(
-                    "status"
-                ) != "error"
-            ):
-
-                break
-
-
-            if (
-                "InvalidOrExpiredToken"
-                in msg
-            ):
-
-                time.sleep(1)
-
-                continue
-
-            break
-
-
-        if process_resp.get(
-            "status"
-        ) == "error":
-
-            msg = process_resp.get(
-                "message",
-                "Lỗi không xác định"
-            )
-
-
-            cooldown = extract_cooldown(
-                msg
-            )
-
-
+        # Debug nếu vẫn lỗi 400
+        if search_resp.status_code == 400:
             return jsonify({
-
-                "success":False,
-
-                "cooldown":
-                cooldown > 0,
-
-                "wait_time":{
-
-                    "minutes":
-                    cooldown//60,
-
-                    "seconds":
-                    cooldown%60,
-
-                    "total_seconds":
-                    cooldown
-                },
-
-                "message":
-                msg
-
+                "success": False,
+                "stage": "search",
+                "message": f"HTTP 400 - Server từ chối request. Có thể video không tồn tại hoặc bị chặn.",
+                "status_code": search_resp.status_code,
+                "response": search_resp.text[:500]  # Trả về nội dung lỗi
             })
 
+        search_data = search_resp.json()
 
-        data = (
+        if search_data.get("status") != "success":
+            return jsonify({
+                "success": False,
+                "stage": "search",
+                "message": search_data.get("message", "Search thất bại"),
+                "response": search_data
+            })
 
-            process_resp.get(
-                "response",
-                {}
-            ).get(
-                "data",
-                {}
-            )
+        token = search_data.get("token")
+        username = search_data.get("username")
+        aweme_id = search_data.get("aweme_id")
 
-            or
+        if not aweme_id:
+            return jsonify({"success": False, "message": "Không lấy được aweme_id"})
 
-            process_resp.get(
-                "data",
-                {}
-            )
+        # === PROCESS ===
+        process_headers = search_headers.copy()
+        payload = {
+            "username": username,
+            "aweme_id": aweme_id,
+            "type": "like",
+            "service_type": "like",
+            "token": token
+        }
 
-        )
+        process_resp = requests.post(
+            "https://tikfollowers.com/api/process",
+            json=payload,
+            headers=process_headers,
+            timeout=20
+        ).json()
 
+        if process_resp.get("status") == "error":
+            msg = process_resp.get("message", "")
+            if "token" in msg.lower() or "InvalidOrExpiredToken" in msg:
+                return jsonify({
+                    "success": False,
+                    "message": "Token lỗi. Thử lại sau 5-10 giây."
+                })
+            
+            cooldown = extract_cooldown(msg)
+            return jsonify({
+                "success": False,
+                "cooldown": True,
+                "wait_time": cooldown,
+                "message": msg
+            })
 
-        stats = (
-
-            data.get(
-                "stats",
-                {}
-            )
-
-            or
-
-            process_resp.get(
-                "stats",
-                {}
-            )
-
-        )
-
+        # Thành công
+        data = process_resp.get("response", {}).get("data") or process_resp.get("data", {})
+        stats = data.get("stats", {}) or process_resp.get("stats", {})
 
         return jsonify({
-
-            "success":True,
-
-            "cooldown":False,
-
-            "username":
-            data.get(
-                "username"
-            )
-            or
-            payload["username"],
-
-
-            "video_id":
-            data.get(
-                "aweme_id"
-            )
-            or
-            payload["aweme_id"],
-
-
-            "amount_processed":
-            data.get(
-                "amount_processed",
-                15
-            ),
-
-
-            "current_views":
-            stats.get(
-                "play_count",
-                0
-            ),
-
-
-            "stats":{
-
-                "likes":
-                stats.get(
-                    "digg_count",
-                    0
-                ),
-
-                "comments":
-                stats.get(
-                    "comment_count",
-                    0
-                ),
-
-                "shares":
-                stats.get(
-                    "share_count",
-                    0
-                ),
-
-                "favorites":
-                stats.get(
-                    "collect_count",
-                    0
-                ),
-
-                "views":
-                stats.get(
-                    "play_count",
-                    0
-                )
+            "success": True,
+            "cooldown": False,
+            "username": data.get("username") or username,
+            "video_id": data.get("aweme_id") or aweme_id,
+            "amount_processed": data.get("amount_processed", 15),
+            "current_views": stats.get("play_count"),
+            "stats": {
+                "likes": stats.get("digg_count"),
+                "comments": stats.get("comment_count"),
+                "shares": stats.get("share_count"),
+                "favorites": stats.get("collect_count"),
+                "views": stats.get("play_count")
             },
-
-            "message":
-            "Buff thành công"
-
+            "message": "Buff thành công"
         })
 
-
     except Exception as e:
-
         return jsonify({
-
-            "success":False,
-
-            "message":
-            "Lỗi server",
-
-            "error":
-            str(e)
-
-        }),500
-
+            "success": False,
+            "message": "Lỗi kết nối",
+            "error": str(e)
+        }), 500
 
 if __name__ == "__main__":
 
