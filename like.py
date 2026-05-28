@@ -1,215 +1,193 @@
-from flask import Flask, request, jsonify
-import requests
+import os
 import re
 import time
+import logging
+from flask import Flask, request, jsonify
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Thiết lập logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+# Cấu hình qua biến môi trường
+TIMEOUT = int(os.getenv("TIMEOUT", 15))
+PORT = int(os.getenv("PORT", 3000))
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+
+# Headers mặc định giả lập trình duyệt
+BASE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
-    "Accept": "application/json"
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://tikfollowers.com",
+    "Referer": "https://tikfollowers.com/"
 }
 
-
-def safe_post(url, payload, timeout=15):
-    try:
-        r = requests.post(
-            url,
-            json=payload,
-            headers=HEADERS,
-            timeout=timeout
+class TikFollowersAPI:
+    """Quản lý tương tác với API tikfollowers.com"""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        # Cấu hình retry tự động khi gặp lỗi mạng
+        retry_strategy = Retry(
+            total=2,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504]
         )
-
-        if r.status_code != 200:
-            return {
-                "status": "error",
-                "message": f"HTTP {r.status_code}"
-            }
-
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        self.session.headers.update(BASE_HEADERS)
+        # Khởi tạo session (gọi trang chủ để lấy cookie)
         try:
-            return r.json()
-        except:
-            return {
-                "status": "error",
-                "message": "Response không phải JSON"
-            }
+            self.session.get("https://tikfollowers.com", timeout=TIMEOUT)
+            logger.info("Session initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize session: {e}")
 
-    except requests.Timeout:
-        return {
-            "status": "error",
-            "message": "Timeout"
-        }
+    def extract_video_id(self, url: str) -> str | None:
+        """Trích xuất video ID từ URL TikTok (cả video/photo)"""
+        try:
+            resp = requests.get(
+                url,
+                allow_redirects=True,
+                timeout=TIMEOUT,
+                headers={"User-Agent": BASE_HEADERS["User-Agent"]}
+            )
+            final_url = resp.url
+            html = resp.text
 
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-
-
-def extract_video_id(url):
-    try:
-
-        r = requests.get(
-            url,
-            allow_redirects=True,
-            timeout=15,
-            headers={
-                "User-Agent":"Mozilla/5.0"
-            }
-        )
-
-        final_url = r.url
-
-        patterns = [
-            r'/video/(\d+)',
-            r'/photo/(\d+)',
-            r'aweme_id=(\d+)'
-        ]
-
-        for p in patterns:
-            m = re.search(p, final_url)
-
+            # Các pattern ưu tiên
+            patterns = [
+                r'/video/(\d+)',
+                r'/photo/(\d+)',
+                r'aweme_id=(\d+)',
+                r'"aweme_id":"(\d+)"',
+            ]
+            for p in patterns:
+                m = re.search(p, final_url or html)
+                if m:
+                    return m.group(1)
+            # Thử tìm trong HTML
+            m = re.search(r'"aweme_id":"(\d+)"', html)
             if m:
                 return m.group(1)
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting video ID: {e}")
+            return None
 
-        html = r.text
+    def extract_cooldown(self, message: str) -> int:
+        """Trích xuất số giây cooldown từ thông báo lỗi"""
+        nums = re.findall(r'(\d+)', str(message))
+        return int(nums[0]) if nums else 0
 
-        m = re.search(
-            r'"aweme_id":"(\d+)"',
-            html
-        )
+    def search(self, video_id: str) -> dict:
+        """Bước 1: Gửi search để lấy token và aweme_id"""
+        try:
+            resp = self.session.post(
+                "https://tikfollowers.com/api/search",
+                json={"input": video_id, "type": "videoDetails"},
+                timeout=TIMEOUT
+            )
+            resp.raise_for_status()  # Raise HTTPError for bad status
+            data = resp.json()
+            return data
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Search HTTP error: {e}, Response: {resp.text[:200] if resp else ''}")
+            return {"status": "error", "message": f"HTTP {e.response.status_code}"}
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            return {"status": "error", "message": str(e)}
 
-        if m:
-            return m.group(1)
-
-        return None
-
-    except:
-        return None
-
-
-def extract_cooldown(text):
-
-    try:
-
-        text = str(text)
-
-        m = re.findall(
-            r'(\d+)',
-            text
-        )
-
-        if not m:
-            return 0
-
-        return int(m[0])
-
-    except:
-        return 0
-
-
-@app.route("/api/like")
-def api_like():
-    link = request.args.get("link", "").strip()
-    if not link:
-        return jsonify({"success": False, "message": "Thiếu ?link="}), 400
-
-    video_id = extract_video_id(link)
-    if not video_id:
-        return jsonify({"success": False, "message": "Không lấy được video ID"}), 400
-
-    try:
-        # Headers mạnh hơn
-        search_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Content-Type": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": "https://tikfollowers.com",
-            "Referer": "https://tikfollowers.com/"
-        }
-
-        # === SEARCH ===
-        search_resp = requests.post(
-            "https://tikfollowers.com/api/search",
-            json={"input": video_id, "type": "videoDetails"},
-            headers=search_headers,
-            timeout=15
-        )
-
-        # Debug nếu vẫn lỗi 400
-        if search_resp.status_code == 400:
-            return jsonify({
-                "success": False,
-                "stage": "search",
-                "message": f"HTTP 400 - Server từ chối request. Có thể video không tồn tại hoặc bị chặn.",
-                "status_code": search_resp.status_code,
-                "response": search_resp.text[:500]  # Trả về nội dung lỗi
-            })
-
-        search_data = search_resp.json()
-
-        if search_data.get("status") != "success":
-            return jsonify({
-                "success": False,
-                "stage": "search",
-                "message": search_data.get("message", "Search thất bại"),
-                "response": search_data
-            })
-
-        token = search_data.get("token")
-        username = search_data.get("username")
-        aweme_id = search_data.get("aweme_id")
-
-        if not aweme_id:
-            return jsonify({"success": False, "message": "Không lấy được aweme_id"})
-
-        # === PROCESS ===
-        process_headers = search_headers.copy()
+    def process(self, service_type: str, token: str, username: str, aweme_id: str, amount: int = None) -> dict:
+        """Bước 2: Gửi yêu cầu buff (like/view/follow/comment)"""
         payload = {
             "username": username,
             "aweme_id": aweme_id,
-            "type": "like",
-            "service_type": "like",
+            "type": service_type,
+            "service_type": service_type,
             "token": token
         }
+        if amount and service_type in ["view", "like"]:  # Một số dịch vụ cho phép tùy chỉnh số lượng
+            payload["amount"] = amount
 
-        process_resp = requests.post(
-            "https://tikfollowers.com/api/process",
-            json=payload,
-            headers=process_headers,
-            timeout=20
-        ).json()
+        try:
+            resp = self.session.post(
+                "https://tikfollowers.com/api/process",
+                json=payload,
+                timeout=TIMEOUT + 10
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"Process HTTP error: {e}, Response: {resp.text[:200] if resp else ''}")
+            return {"status": "error", "message": f"HTTP {e.response.status_code}"}
+        except Exception as e:
+            logger.error(f"Process error: {e}")
+            return {"status": "error", "message": str(e)}
 
-        if process_resp.get("status") == "error":
-            msg = process_resp.get("message", "")
-            if "token" in msg.lower() or "InvalidOrExpiredToken" in msg:
-                return jsonify({
-                    "success": False,
-                    "message": "Token lỗi. Thử lại sau 5-10 giây."
-                })
-            
-            cooldown = extract_cooldown(msg)
-            return jsonify({
+    def execute_service(self, service_type: str, video_url: str, amount: int = None) -> dict:
+        """Chuỗi hoàn chỉnh: extract ID -> search -> process -> response"""
+        # Xác thực link
+        video_id = self.extract_video_id(video_url)
+        if not video_id:
+            return {"success": False, "message": "Không thể trích xuất video ID từ link"}
+
+        logger.info(f"Processing {service_type} for video_id={video_id}")
+
+        # Bước search
+        search_result = self.search(video_id)
+        if search_result.get("status") != "success":
+            return {
                 "success": False,
-                "cooldown": True,
-                "wait_time": cooldown,
-                "message": msg
-            })
+                "stage": "search",
+                "message": search_result.get("message", "Search thất bại"),
+                "response": search_result
+            }
 
-        # Thành công
-        data = process_resp.get("response", {}).get("data") or process_resp.get("data", {})
-        stats = data.get("stats", {}) or process_resp.get("stats", {})
+        token = search_result.get("token")
+        username = search_result.get("username")
+        aweme_id = search_result.get("aweme_id")
+        if not aweme_id:
+            return {"success": False, "message": "Không lấy được aweme_id từ search"}
 
-        return jsonify({
+        # Bước process
+        process_result = self.process(service_type, token, username, aweme_id, amount)
+        
+        # Xử lý lỗi token
+        if process_result.get("status") == "error":
+            msg = process_result.get("message", "")
+            if "token" in msg.lower() or "InvalidOrExpiredToken" in msg:
+                return {
+                    "success": False,
+                    "message": "Token hết hạn hoặc không hợp lệ. Hãy thử lại sau 5-10 giây."
+                }
+            cooldown = self.extract_cooldown(msg)
+            if cooldown > 0:
+                return {
+                    "success": False,
+                    "cooldown": True,
+                    "wait_time": cooldown,
+                    "message": f"Vui lòng chờ {cooldown}s rồi thử lại."
+                }
+            return {"success": False, "message": msg}
+
+        # Thành công: trích xuất dữ liệu thống kê nếu có
+        data = process_result.get("response", {}).get("data") or process_result.get("data", {})
+        stats = data.get("stats", {}) or process_result.get("stats", {})
+        
+        result = {
             "success": True,
-            "cooldown": False,
+            "service": service_type,
             "username": data.get("username") or username,
             "video_id": data.get("aweme_id") or aweme_id,
-            "amount_processed": data.get("amount_processed", 15),
-            "current_views": stats.get("play_count"),
+            "amount_processed": data.get("amount_processed", amount or "default"),
             "stats": {
                 "likes": stats.get("digg_count"),
                 "comments": stats.get("comment_count"),
@@ -218,19 +196,51 @@ def api_like():
                 "views": stats.get("play_count")
             },
             "message": "Buff thành công"
-        })
+        }
+        return result
 
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": "Lỗi kết nối",
-            "error": str(e)
-        }), 500
+# Khởi tạo instance API toàn cục
+tiktok_api = TikFollowersAPI()
+
+# ---------------- API Endpoints ----------------
+
+@app.route("/api/like")
+def api_like():
+    link = request.args.get("link", "").strip()
+    if not link:
+        return jsonify({"success": False, "message": "Thiếu ?link="}), 400
+    amount = request.args.get("amount", type=int)  # cho phép ?amount=100 (nếu API hỗ trợ)
+    result = tiktok_api.execute_service("like", link, amount)
+    return jsonify(result)
+
+@app.route("/api/view")
+def api_view():
+    link = request.args.get("link", "").strip()
+    if not link:
+        return jsonify({"success": False, "message": "Thiếu ?link="}), 400
+    amount = request.args.get("amount", type=int)
+    result = tiktok_api.execute_service("view", link, amount)
+    return jsonify(result)
+
+@app.route("/api/follow")
+def api_follow():
+    link = request.args.get("link", "").strip()
+    if not link:
+        return jsonify({"success": False, "message": "Thiếu ?link="}), 400
+    result = tiktok_api.execute_service("follow", link)
+    return jsonify(result)
+
+@app.route("/api/comment")
+def api_comment():
+    link = request.args.get("link", "").strip()
+    if not link:
+        return jsonify({"success": False, "message": "Thiếu ?link="}), 400
+    result = tiktok_api.execute_service("comment", link)
+    return jsonify(result)
+
+@app.route("/api/health")
+def health_check():
+    return jsonify({"status": "ok", "service": "TikTok Buff API"})
 
 if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=3000,
-        debug=False
-    )
+    app.run(host="0.0.0.0", port=PORT, debug=DEBUG)
